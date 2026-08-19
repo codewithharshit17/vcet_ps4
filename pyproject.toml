@@ -1,0 +1,45 @@
+[project]
+name = "tokendiet"
+version = "0.1.0"
+description = "Token-Diet — dynamic post-retrieval context compressor with live A/B measurement"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # config / plumbing
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "python-dotenv>=1.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "numpy>=1.26",
+    # retrieval
+    "qdrant-client>=1.9",
+    "sentence-transformers>=3.0",
+    "rank-bm25>=0.2.2",
+    # sentence segmentation (M2)
+    "syntok>=1.4.4",
+    # tokenizer ground truth
+    "tiktoken>=0.7",
+    # LLM (Groq is OpenAI-compatible)
+    "openai>=1.40",
+    # cache
+    "redis>=5.0",
+    # corpus fetch + document parsing
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "pypdf>=4.2",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.111", "uvicorn[standard]>=0.30", "sse-starlette>=2.1"]
+
+[project.scripts]
+tokendiet = "tokendiet.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tokendiet"]
