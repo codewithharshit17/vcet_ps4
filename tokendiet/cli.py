@@ -223,5 +223,129 @@ def compress(
     console.print(summary)
 
 
+def _fmt(d, unit: str = "", scale: float = 1.0, prec: int = 0) -> str:
+    """Render a Distribution as 'median (p95 x)'. Unmeasured shows an em dash."""
+    if d.median is None:
+        return "—"
+    return f"{d.median * scale:,.{prec}f}{unit} (p95 {d.p95 * scale:,.{prec}f}{unit})"
+
+
+@app.command()
+def ab(
+    queries: list[str] = typer.Argument(..., help="One or more queries."),
+    runs: int = typer.Option(None, help=f"Runs per query (default {settings.eval_runs_per_cell})."),
+    budget: int = typer.Option(None, help=f"Token budget (default {settings.token_budget})."),
+    sequential: bool = typer.Option(False, help="Run paths sequentially instead of concurrently."),
+    show_answers: bool = typer.Option(False, help="Print both answers."),
+) -> None:
+    """Live A/B: run both paths concurrently and report median + p95 TTFT."""
+    import asyncio
+
+    from .dualpath import run_once
+    from .llm.groq import GroqClient
+    from .metrics import ABSummary
+    from .pipeline import Compressor
+
+    n = runs or settings.eval_runs_per_cell
+    try:
+        client = GroqClient()
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    c = Compressor.load()
+    warm = c.warmup()
+
+    # Warm the LLM connection too: the first HTTPS handshake is not a
+    # latency measurement, and would otherwise land entirely on run 1.
+    async def _warm_llm() -> float:
+        t = _now()
+        async for _ in client.stream("You are terse.", "Say OK.", max_tokens=1):
+            pass
+        return (_now() - t) / 1e6
+
+    from .timing import now_ns as _now
+
+    llm_warm = asyncio.run(_warm_llm())
+    console.print(
+        "[dim]Warm-up (all discarded): "
+        + ", ".join(f"{k}={v:.0f}ms" for k, v in warm.items())
+        + f", llm={llm_warm:.0f}ms[/dim]"
+    )
+    console.print(f"[dim]Model: {settings.answer_model} · runs/query: {n} · "
+                  f"{'sequential' if sequential else 'concurrent'} paths[/dim]")
+
+    for q in queries:
+        good, discarded = [], 0
+        for i in range(n):
+            run, _comp = asyncio.run(run_once(c, q, budget=budget, sequential=sequential))
+            if run.baseline.error or run.compressed.error:
+                console.print(f"[red]run {i+1} failed: "
+                              f"{run.baseline.error or run.compressed.error}[/red]")
+                continue
+            if run.contaminated:
+                # A prefix-cache hit makes a run cheaper and faster than a cold
+                # one; averaging it in would be a remembered baseline.
+                discarded += 1
+                continue
+            good.append(run)
+
+        if not good:
+            console.print(f"[red]No clean runs for {q!r}.[/red]")
+            continue
+
+        s = ABSummary(query=q, runs=good, discarded_contaminated=discarded)
+        rep = s.report()
+
+        t = Table(header_style="bold", title=f"\n{q}", title_justify="left")
+        t.add_column("metric")
+        t.add_column("baseline", justify="right")
+        t.add_column("compressed", justify="right")
+        t.add_column("delta", justify="right")
+
+        d = rep
+        t.add_row("context tokens",
+                  _fmt(s._f(lambda r: r.baseline.context_tokens)),
+                  _fmt(s._f(lambda r: r.compressed.context_tokens)),
+                  _fmt(s._f(lambda r: r.tokens_saved)))
+        t.add_row("prompt tokens (server)",
+                  _fmt(s._f(lambda r: r.baseline.prompt_tokens)),
+                  _fmt(s._f(lambda r: r.compressed.prompt_tokens)), "—")
+        t.add_row("output tokens",
+                  _fmt(s._f(lambda r: r.baseline.output_tokens)),
+                  _fmt(s._f(lambda r: r.compressed.output_tokens)), "—")
+        t.add_row("TTFT ms",
+                  _fmt(s._f(lambda r: r.baseline.ttft_ms)),
+                  _fmt(s._f(lambda r: r.compressed.ttft_ms)),
+                  _fmt(s._f(lambda r: r.ttft_delta_ms)))
+        t.add_row("total latency ms",
+                  _fmt(s._f(lambda r: r.baseline.total_latency_ms)),
+                  _fmt(s._f(lambda r: r.compressed.total_latency_ms)), "—")
+        t.add_row("cost USD",
+                  _fmt(s._f(lambda r: r.baseline.cost()), scale=1, prec=6),
+                  _fmt(s._f(lambda r: r.compressed.cost()), scale=1, prec=6),
+                  _fmt(s._f(lambda r: r.cost_saved_usd), scale=1, prec=6))
+        console.print(t)
+
+        ratio = s._f(lambda r: r.compression_ratio)
+        console.print(
+            f"  compression ratio: [bold]{'—' if ratio.median is None else f'{ratio.median*100:.1f}%'}[/bold]"
+            f" · pipeline overhead {_fmt(s._f(lambda r: r.pipeline_overhead_ms), 'ms')}"
+            f" · clean runs {len(good)}/{n}"
+            + (f" · [yellow]{discarded} discarded (cache-contaminated)[/yellow]" if discarded else "")
+        )
+
+        delta = s._f(lambda r: r.ttft_delta_ms)
+        if delta.median is not None:
+            verdict = "compression WINS" if delta.median > 0 else "compression LOSES"
+            colour = "green" if delta.median > 0 else "red"
+            console.print(f"  [{colour}]{verdict} on TTFT by {abs(delta.median):.0f} ms (median)[/{colour}]")
+
+        if show_answers:
+            for label, run in (("BASELINE", good[-1].baseline), ("COMPRESSED", good[-1].compressed)):
+                console.print(f"\n[bold cyan]--- {label} ANSWER ---[/bold cyan]")
+                console.print(run.answer[:1200])
+
+
 if __name__ == "__main__":
     app()

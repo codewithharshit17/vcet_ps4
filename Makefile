@@ -23,5 +23,15 @@ services:
 down:
 	docker compose down
 
-dev: setup corpus ingest
-	@echo "Ready. Try: make retrieve Q=\"what are the principal risk factors?\""
+# Usage: make ab Q="..."   (needs GROQ_API_KEY in .env)
+ab:
+	uv run tokendiet ab "$(Q)"
+
+web-build:
+	cd web && npm install && npm run build
+
+api:
+	uv run uvicorn tokendiet.api:app --host 127.0.0.1 --port 8000
+
+dev: setup corpus ingest web-build
+	@echo "Ready. Run 'make api' and open http://127.0.0.1:8000"

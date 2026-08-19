@@ -7,3 +7,7 @@ eval/results.json
 node_modules/
 web/dist/
 .uv/
+
+# frontend
+web/node_modules/
+web/dist/
