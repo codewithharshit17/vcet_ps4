@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     mmr_lambda: float = 0.7
     relevance_threshold: float = 0.0
 
+    # Cosine similarity above which a sentence is called a duplicate of one
+    # already kept. MMR's lambda alone only *demotes* redundancy; an explicit
+    # threshold is what lets the dashboard say "redundant with S4 (sim 0.91)".
+    mmr_redundancy_threshold: float = 0.85
+
     # Stage [3] score blend. w_bm25=0 reproduces the brief's cross-encoder-only
     # pipeline, so the eval can measure whether the deck's BM25 term earns its keep.
     score_weight_cross_encoder: float = 0.7

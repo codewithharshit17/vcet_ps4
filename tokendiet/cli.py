@@ -141,5 +141,87 @@ def retrieve(
             console.print(h.chunk.text[:700] + ("…" if len(h.chunk.text) > 700 else ""))
 
 
+@app.command()
+def compress(
+    queries: list[str] = typer.Argument(..., help="One or more queries."),
+    budget: int = typer.Option(None, help=f"Token budget (default {settings.token_budget})."),
+    k: int = typer.Option(None, help=f"Top-K (default {settings.top_k})."),
+    lam: float = typer.Option(None, "--lambda", help=f"MMR lambda (default {settings.mmr_lambda})."),
+    threshold: float = typer.Option(None, help="Relevance threshold."),
+    strip: bool = typer.Option(None, help="Aggressive word stripping (default off)."),
+    show: int = typer.Option(0, help="Print the first N lines of each context."),
+) -> None:
+    """Run stages [2]-[6] and report the compression achieved."""
+    from .pipeline import Compressor
+
+    c = Compressor.load()
+    warm = c.warmup()
+    console.print(
+        "[dim]Warm-up (discarded): "
+        + ", ".join(f"{k_}={v:.0f}ms" for k_, v in warm.items())
+        + "[/dim]"
+    )
+
+    summary = Table(header_style="bold", title="\nCompression summary", title_justify="left")
+    for col, just in (
+        ("query", "left"), ("baseline", "right"), ("compressed", "right"),
+        ("saved", "right"), ("ratio", "right"), ("sent kept", "right"),
+        ("overhead", "right"),
+    ):
+        summary.add_column(col, justify=just)
+
+    for q in queries:
+        r = c.run(
+            q, budget=budget, top_k=k, mmr_lambda=lam,
+            relevance_threshold=threshold, aggressive_strip=strip,
+        )
+        ratio = r.compression_ratio
+        summary.add_row(
+            q if len(q) < 46 else q[:43] + "...",
+            f"{r.baseline_context_tokens:,}",
+            f"{r.compressed_context_tokens:,}",
+            f"{r.tokens_saved:,}",
+            "—" if ratio is None else f"{ratio * 100:.1f}%",
+            f"{len(r.kept)}/{len(r.sentences)}",
+            f"{r.pipeline_overhead_ms:.0f}ms",
+        )
+
+        stage = Table(header_style="bold", title=f"\n  stages · {q[:60]}", title_justify="left")
+        stage.add_column("stage")
+        stage.add_column("ms", justify="right")
+        for name, val in r.timeline.to_dict().items():
+            stage.add_row(name, "—" if val is None else f"{val:.1f}")
+        console.print(stage)
+
+        reasons: dict[str, int] = {}
+        for s in r.dropped:
+            raw = s.drop_reason or "?"
+            # Group by reason TYPE, not by the specific sentence cited.
+            key = "redundant" if raw.startswith("redundant") else raw.split(" (")[0]
+            reasons[key] = reasons.get(key, 0) + 1
+        if reasons:
+            console.print(
+                "  dropped: "
+                + ", ".join(f"[bold]{v}[/bold] {k_}" for k_, v in sorted(reasons.items()))
+            )
+        cs = r.cache_stats
+        console.print(
+            f"  cache: cross-encoder {cs.get('ce_hits', 0)}h/{cs.get('ce_misses', 0)}m, "
+            f"embeddings {cs.get('emb_hits', 0)}h/{cs.get('emb_misses', 0)}m"
+        )
+        if r.strip_tokens_saved is not None:
+            console.print(f"  aggressive strip saved: {r.strip_tokens_saved} tokens")
+
+        if show:
+            for label, body in (
+                ("BASELINE (what the LLM would have received)", r.baseline_context),
+                ("COMPRESSED (what it actually receives)", r.compressed_context),
+            ):
+                console.print(f"\n[bold cyan]--- {label} ---[/bold cyan]")
+                console.print("\n".join(body.splitlines()[:show]))
+
+    console.print(summary)
+
+
 if __name__ == "__main__":
     app()

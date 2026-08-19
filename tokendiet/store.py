@@ -8,6 +8,7 @@ set. Same client library, same API, one code path.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import shutil
 from dataclasses import dataclass
@@ -43,11 +44,33 @@ class Chunk:
         return int.from_bytes(digest, "big") % (2**63)
 
 
+_OPEN: list[QdrantClient] = []
+
+
+@atexit.register
+def _close_open_clients() -> None:
+    """Close clients before interpreter teardown.
+
+    qdrant-client's __del__ releases a portalocker file lock, but by the time
+    __del__ runs at shutdown `msvcrt` has already been unloaded on Windows and
+    it raises a ModuleNotFoundError traceback on every single run. Closing at
+    atexit happens early enough to avoid that.
+    """
+    while _OPEN:
+        try:
+            _OPEN.pop().close()
+        except Exception:  # noqa: BLE001 - best effort during shutdown
+            pass
+
+
 def get_client() -> QdrantClient:
     if settings.qdrant_url:
-        return QdrantClient(url=settings.qdrant_url)
-    QDRANT_LOCAL_PATH.mkdir(parents=True, exist_ok=True)
-    return QdrantClient(path=str(QDRANT_LOCAL_PATH))
+        client = QdrantClient(url=settings.qdrant_url)
+    else:
+        QDRANT_LOCAL_PATH.mkdir(parents=True, exist_ok=True)
+        client = QdrantClient(path=str(QDRANT_LOCAL_PATH))
+    _OPEN.append(client)
+    return client
 
 
 def backend_name() -> str:
